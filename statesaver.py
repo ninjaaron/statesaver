@@ -7,8 +7,19 @@ import pathlib
 from functools import wraps, partial
 
 
+def def_setattr(self, attr, val):
+    self.state[attr] = val
+
+
 class Holder(type):
     def __new__(cls, name, bases, clsdict):
+        if '__setattr__' not in clsdict:
+            clsdict['__setattr__'] = def_setattr
+
+        for f_name in ('load', 'dump'):
+            if f_name in clsdict:
+                clsdict[f_name] = staticmethod(clsdict[f_name])
+
         clsobj = type.__new__(cls, name, bases, clsdict)
         orig_init = clsobj.__init__
         orig_setattr = clsobj.__setattr__
@@ -31,12 +42,37 @@ class Holder(type):
         return clsobj
 
 
-class StateSaver(metaclass=Holder):
-    def __init__(self, cache_path, erase=False):
-        "docstring"
+class Base(metaclass=Holder):
+    def __init__(self, cache_path, erase=False,
+                 load_kwargs=None, dump_kwargs=None):
+
+        self.load_kwargs = load_kwargs or {}
+        self.dump_kwargs = dump_kwargs or {}
         self.cache_path = pathlib.Path(cache_path)
         self.erase = erase
         self.prep_state()
+
+    def prep_state(self):
+        if self.cache_path.exists():
+            with self.cache_path.open() as c:
+                self.state = self.load(c, **self.load_kwargs)
+        else:
+            self.state = {}
+
+    def close(self):
+        with self.cache_path.open('w') as c:
+            self.dump(self.state, c, **self.dump_kwargs)
+
+    def __getattr__(self, attr):
+        return self.state[attr]
+
+    def __delattr__(self, attr):
+        del self.state[attr]
+
+    def pop(self, attr):
+        val = getattr(self, attr)
+        del self.state[attr]
+        return val
 
     def __enter__(self):
         return self
@@ -48,37 +84,18 @@ class StateSaver(metaclass=Holder):
             self.close()
 
 
-class JState(StateSaver):
+class JState(Base):
     """backup to json"""
-    def __init__(self, cache_path, erase=False,
-                 load_kwargs=None, dump_kwargs=None):
-        self.load_kwargs = load_kwargs or {}
-        self.dump_kwargs = dump_kwargs or {}
-        super().__init__(cache_path, erase)
-
-    def prep_state(self, load_func=None):
-        if not load_func:
-            load_func = json.load
-        if self.cache_path.exists():
-            with self.cache_path.open() as c:
-                self.state = load_func(c, **self.load_kwargs)
-        else:
-            self.state = {}
-
-    def __setattr__(self, attr, val):
-        self.state[attr] = val
-
-    def __getattr__(self, attr):
-        return self.state[attr]
-
-    def close(self, dump_func=None):
-        if not dump_func:
-            dump_func = json.dump
-        with self.cache_path.open('w') as c:
-            dump_func(self.state, c, **self.dump_kwargs)
+    load = json.load
+    dump = json.dump
 
 
-class DBState(JState):
+class YState(Base):
+    load = yaml.safe_load
+    dump = yaml.safe_dump
+
+
+class DBState(Base):
     def __init__(self, cache_path, erase=False, mode='c', *args, **kwargs):
         self._mode = mode
         super().__init__(cache_path, erase, *args, **kwargs)
@@ -99,19 +116,6 @@ class DBState(JState):
     def close(self):
         self.state.close()
 
-
-class YState(JState):
-    def prep_state(self):
-        super().prep_state(yaml.safe_load)
-
-    def __setattr__(self, attr, val):
-        self.state[attr] = val
-
-    def __getattr__(self, attr):
-        return self.state[attr]
-
-    def close(self):
-        super().close(yaml.safe_dump)
 
 
 class Looper(JState):
@@ -146,12 +150,6 @@ class Looper(JState):
         else:
             self.state = {}
 
-    def __setattr__(self, attr, val):
-        self.state[attr] = val
-
-    def __getattr__(self, attr):
-        return self.state[attr]
-
     def __exit__(self, type, value, traceback):
         if type:
             if self.safe:
@@ -165,10 +163,15 @@ class Looper(JState):
     def safe_dump(self):
         if self.read_cache:
             self.read_cache.close()
+        if 'remaining' in self.state:
             del self.state['remaining']
         with self.cache_path.open('w') as cache:
             dump = partial(json.dumps, **self.dump_kwargs)
-            print(dump(self.state), file=cache)
+            try:
+                print(dump(self.state), file=cache)
+            except TypeError:
+                print(self.state)
+                raise
             print(*(dump(i) for i in self.iterable), sep='\n', file=cache)
 
     def unsafe_dump(self):
@@ -177,7 +180,8 @@ class Looper(JState):
             pickle.dump(self.state, cache, **self.dump_kwargs)
 
     def __iter__(self):
-        return self.iterable
+        with self:
+            yield from self.iterable
 
 
 class FilePos(JState):
@@ -194,7 +198,8 @@ class FilePos(JState):
             self.file.close()
 
     def __iter__(self):
-        return iter(self.file)
+        with self:
+            yield from self.file
 
 
 def rewind(file):
@@ -219,13 +224,3 @@ def state(cache_path, erase=False, dbm_mode=None):
         return DBState(cache_path, erase, dbm_mode)
     else:
         return JState(cache_path, erase)
-
-
-def loop(cache_path, iterable=None, cache_first=True, safe=True):
-    with Looper(cache_path, iterable, cache_first, safe) as s:
-        yield from ((s, i) for i in s)
-
-
-def iterfile(cache_path, file, erase=True, **kwargs):
-    with FilePos(cache_path, file, erase=erase, **kwargs):
-        yield from file
