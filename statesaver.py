@@ -1,3 +1,4 @@
+import itertools
 import os
 import pickle
 import json
@@ -197,9 +198,26 @@ class Looper(JState):
             yield from self.iterable
 
 
+
+class PlayQueue(statesaver.Looper):
+    """A Looper that puts the last item back in the queue when the loop is
+    broken.
+    """
+    def __iter__(self):
+        with self:
+            for i in self.iterable:
+                self.current = i
+                yield i
+
+    def __exit__(self, *args, **kwargs):
+        self.iterable = itertools.chain((self.pop('current'),), self.iterable)
+        super().__exit__(*args, **kwargs)
+
+
+
 class FilePos(JState):
     def __init__(self, cache_path, file, *args, **kwargs):
-        "docstring"
+        """Wrap a file. Remember position when loop breaks."""
         self.file = file
         super().__init__(cache_path, *args, **kwargs)
         pos = self.state.get('pos', 0)
@@ -213,6 +231,9 @@ class FilePos(JState):
     def __iter__(self):
         with self:
             yield from self.file
+
+    def __getattr__(self, attr):
+        return getattr(self.file, attr)
 
 
 def rewind(file):
