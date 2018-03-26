@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='statesaver',
-    version='0.3',
+    version='0.3.1',
     description= \
         'context managers and iterators for serializing state on failure',
     # long_description=open('README.rst').read(),

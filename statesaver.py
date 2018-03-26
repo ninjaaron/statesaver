@@ -199,7 +199,7 @@ class Looper(JState):
 
 
 
-class PlayQueue(statesaver.Looper):
+class PlayQueue(Looper):
     """A Looper that puts the last item back in the queue when the loop is
     broken.
     """
