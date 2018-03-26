@@ -12,6 +12,10 @@ def def_setattr(self, attr, val):
 
 
 class Holder(type):
+    """metaclass that lets __setattr__ point to an internal dictionary, but
+    only after the __init__ method has run. Kind of a stupid idea. I'd
+    just use a dictionary if I were doing it again.
+    """
     def __new__(cls, name, bases, clsdict):
         if '__setattr__' not in clsdict:
             clsdict['__setattr__'] = def_setattr
@@ -45,6 +49,9 @@ class Holder(type):
 class Base(metaclass=Holder):
     def __init__(self, cache_path, erase=False,
                  load_kwargs=None, dump_kwargs=None):
+        """Abstract class for for dumping state to disk when the context
+        manager exits and resuming on next run.
+        """
 
         self.load_kwargs = load_kwargs or {}
         self.dump_kwargs = dump_kwargs or {}
@@ -91,12 +98,16 @@ class JState(Base):
 
 
 class YState(Base):
+    """backup to safe YAML"""
     load = yaml.safe_load
     dump = yaml.safe_dump
 
 
 class DBState(Base):
     def __init__(self, cache_path, erase=False, mode='c', *args, **kwargs):
+        """backup to a unix db that contains json (i.e. like shelve.Shelf, but
+        uses json instead of pickle.
+        """
         self._mode = mode
         super().__init__(cache_path, erase, *args, **kwargs)
 
@@ -117,10 +128,12 @@ class DBState(Base):
         self.state.close()
 
 
-
 class Looper(JState):
     def __init__(self, cache_path, iterable=None,
                  cache_first=True, safe=True, **kwargs):
+        """Wraps an iterable for looping. If the loop is broken, the remaining
+        items in the iterable will be serialized.
+        """
         self.safe = safe
         super().__init__(cache_path, **kwargs)
         if safe:
