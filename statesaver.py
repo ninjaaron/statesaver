@@ -1,59 +1,47 @@
+import dbm
+import json
 import itertools
 import os
-import pickle
-import json
-import yaml
-import dbm
 import pathlib
-from functools import wraps, partial
+import pickle
+from functools import partial
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 
-def def_setattr(self, attr, val):
-    self.state[attr] = val
+METHODS = ('__getitem__', '__iter__', '__len__', '__contains__', '__eq__',
+           '__ne__', '__setitem__', '__delitem__')
 
 
-class Holder(type):
-    """metaclass that lets __setattr__ point to an internal dictionary, but
-    only after the __init__ method has run. Kind of a stupid idea. I'd
-    just use a dictionary if I were doing it again.
+def get_dummy(name):
+    def dummy_method(self, *args, **kwargs):
+        return getattr(self.state, name)(*args, **kwargs)
+    return dummy_method
+
+
+class Loader(type):
+    """Turn load and dump properties into static methods.
+    Add forwarding for some mapping methods.
     """
     def __new__(cls, name, bases, clsdict):
-        if '__setattr__' not in clsdict:
-            clsdict['__setattr__'] = def_setattr
-
         for f_name in ('load', 'dump'):
             if f_name in clsdict:
                 clsdict[f_name] = staticmethod(clsdict[f_name])
 
-        clsobj = type.__new__(cls, name, bases, clsdict)
-        orig_init = clsobj.__init__
-        orig_setattr = clsobj.__setattr__
-        clsobj.__setattr__ = object.__setattr__
-
-        @wraps(orig_setattr)
-        def __setattr__(self, attr, val):
-            if attr in self.__dict__:
-                object.__setattr__(self, attr, val)
-            else:
-                orig_setattr(self, attr, val)
-
-        @wraps(orig_init)
-        def __init__(self, *args, **kwargs):
-            clsobj.__setattr__ = object.__setattr__
-            orig_init(self, *args, **kwargs)
-            clsobj.__setattr__ = __setattr__
-
-        clsobj.__init__ = __init__
-        return clsobj
+        for meth in METHODS:
+            if meth not in clsdict:
+                clsdict[meth] = get_dummy(meth)
+        return type.__new__(cls, name, bases, clsdict)
 
 
-class Base(metaclass=Holder):
+class Base(metaclass=Loader):
     def __init__(self, cache_path, erase=False,
                  load_kwargs=None, dump_kwargs=None):
         """Abstract class for for dumping state to disk when the context
         manager exits and resuming on next run.
         """
-
         self.load_kwargs = load_kwargs or {}
         self.dump_kwargs = dump_kwargs or {}
         self.cache_path = pathlib.Path(cache_path)
@@ -67,20 +55,12 @@ class Base(metaclass=Holder):
         else:
             self.state = {}
 
+    def __getattr__(self, attr):
+        return getattr(self.state, attr)
+
     def close(self):
         with self.cache_path.open('w') as c:
             self.dump(self.state, c, **self.dump_kwargs)
-
-    def __getattr__(self, attr):
-        return self.state[attr]
-
-    def __delattr__(self, attr):
-        del self.state[attr]
-
-    def pop(self, attr):
-        val = getattr(self, attr)
-        del self.state[attr]
-        return val
 
     def __enter__(self):
         return self
@@ -115,15 +95,12 @@ class DBState(Base):
     def prep_state(self):
         self.state = dbm.open(self.cache_path.name, self._mode)
 
-    def __setattr__(self, attr, val):
-        self.state[attr] = json.dumps(
+    def __setitem__(self, key, val):
+        self.state[key] = json.dumps(
             val, separators=(':', ','), **self.dump_kwargs)
 
-    def __getattr__(self, attr):
-        return json.loads(self.state[attr].decode(), **self.load_kwargs)
-
-    def sync(self):
-        self.state.sync()
+    def __getitem__(self, item):
+        return json.loads(self.state[item].decode(), **self.load_kwargs)
 
     def close(self):
         self.state.close()
@@ -198,7 +175,6 @@ class Looper(JState):
             yield from self.iterable
 
 
-
 class PlayQueue(Looper):
     """A Looper that puts the last item back in the queue when the loop is
     broken.
@@ -206,13 +182,12 @@ class PlayQueue(Looper):
     def __iter__(self):
         with self:
             for i in self.iterable:
-                self.current = i
+                self['current'] = i
                 yield i
 
     def __exit__(self, *args, **kwargs):
         self.iterable = itertools.chain((self.pop('current'),), self.iterable)
         super().__exit__(*args, **kwargs)
-
 
 
 class FilePos(JState):
