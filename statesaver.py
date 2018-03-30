@@ -1,10 +1,11 @@
+import collections
 import dbm
 import json
 import itertools
 import os
 import pathlib
 import pickle
-from functools import partial
+from functools import partial, wraps
 try:
     import yaml
 except ImportError:
@@ -190,17 +191,46 @@ class PlayQueue(Looper):
         super().__exit__(*args, **kwargs)
 
 
+class Quit(Exception):
+    pass
+
+
+class QFuncWrapper(collections.UserDict):
+    def __init__(self, func, cache):
+        self.data = {}
+        self.func = func
+        self.cache = cache
+
+    def __call__(self, iterable, *args, **kwargs):
+        q = PlayQueue(self.cache, iterable)
+        q.update(self.data)
+        self.data = q
+        for i in self:
+            try:
+                output = self.func(i, *args, **kwargs)
+                if output:
+                    self.setdefault('output', []).append(output)
+            except Quit:
+                break
+
+
+def q(cache):
+    def decorator(func):
+        return wraps(func)(QFuncWrapper(func, cache))
+    return decorator
+
+
 class FilePos(JState):
     def __init__(self, cache_path, file, *args, **kwargs):
         """Wrap a file. Remember position when loop breaks."""
         self.file = file
         super().__init__(cache_path, *args, **kwargs)
-        pos = self.state.get('pos', 0)
+        pos = self.state.get('position', 0)
         self.file.seek(pos)
 
     def __exit__(self, type, value, traceback):
         if type:
-            self.state['pos'] = self.file.tell()
+            self.state['position'] = self.file.tell()
             self.file.close()
 
     def __iter__(self):
